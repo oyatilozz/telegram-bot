@@ -4,7 +4,7 @@ import sqlite3
 import os
 
 # Telegram Bot Token va Admin ID
-TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+TOKEN = os.getenv("BOT_TOKEN", "8964988664:AAHn4OnFl-huujz5gME5WvqT-yji6CWrAio")
 ADMIN_ID = 811276490  # Sizning Telegram ID'ingiz
 
 bot = telebot.TeleBot(TOKEN)
