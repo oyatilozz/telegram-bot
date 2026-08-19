@@ -1,332 +1,293 @@
-import logging
+import telebot
+from telebot import types
+import sqlite3
 import os
-from dotenv import load_dotenv
 
-from telegram import (
-    Update,
-    ReplyKeyboardMarkup,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ConversationHandler,
-    ContextTypes,
-    filters,
-)
+# Telegram Bot Token va Admin ID
+TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+ADMIN_ID = 811276490  # Sizning Telegram ID'ingiz
 
-import database as db
+bot = telebot.TeleBot(TOKEN)
 
-load_dotenv()
+# ==========================================
+# 1. MA'LUMOTLAR BAZASI (SQLITE)
+# ==========================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
-COIN_PER_FOLLOW = int(os.getenv("COIN_PER_FOLLOW", "10"))
+def get_db():
+    conn = sqlite3.connect("bot_database.db")
+    conn.row_factory = sqlite3.Row
+    return conn
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
-
-# Conversation states
-ASK_LINK, ASK_COUNT = range(2)
-WAITING_SCREENSHOT = 10
-
-MAIN_MENU = ReplyKeyboardMarkup(
-    [
-        ["🎯 Vazifa bajarish", "💰 Balansim"],
-        ["📢 Post qilish", "🏆 Reyting"],
-        ["👤 Profilim", "🎁 Kunlik bonus"],
-        ["ℹ️ Qoidalar"],
-    ],
-    resize_keyboard=True,
-)
-
-
-# ---------- asosiy menyu ----------
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    db.get_or_create_user(user.id, user.username or user.first_name)
-    await update.message.reply_text(
-        "Assalomu alaykum! 👋\n\n"
-        "Bu bot orqali boshqalarning Instagram sahifasiga obuna bo'lib tanga "
-        f"({COIN_PER_FOLLOW} tanga har bir obuna uchun) topasiz, keyin o'zingizga "
-        "obunachi olish uchun shu tangalarni sarflaysiz.\n\n"
-        "Quyidagi menyudan foydalaning:",
-        reply_markup=MAIN_MENU,
-    )
-
-
-async def show_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    balance = db.get_balance(update.effective_user.id)
-    await update.message.reply_text(f"💰 Sizning balansingiz: <b>{balance} tanga</b>", parse_mode="HTML")
-
-
-async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    balance = db.get_balance(user.id)
-    await update.message.reply_text(
-        f"👤 <b>Sizning profilingiz:</b>\n\n"
-        f"🆔 ID: <code>{user.id}</code>\n"
-        f"ism: {user.first_name}\n"
-        f"💰 Balans: <b>{balance} tanga</b>",
-        parse_mode="HTML",
-        reply_markup=MAIN_MENU,
-    )
-
-
-async def daily_bonus(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Bu yerda oddiy kunlik bonus berish mantiqi (bazaga bog'liq holda kengaytirish mumkin)
-    user_id = update.effective_user.id
-    bonus_amount = 5
-    db.approve_submission  # yoki bazaga tanga qo'shish funksiyasi
-    # Hozircha oddiy xabar sifatida:
-    await update.message.reply_text(
-        f"🎁 Siz kunlik bonus sifatida <b>{bonus_amount} tanga</b> oldingiz! (Tez orada to'liq ishga tushadi)",
-        parse_mode="HTML",
-        reply_markup=MAIN_MENU,
-    )
-
-
-async def show_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "ℹ️ <b>Qoidalar</b>\n\n"
-        f"1. Vazifa bajaring (birov aytgan Instagram sahifasiga obuna bo'ling) — {COIN_PER_FOLLOW} tanga olasiz.\n"
-        "2. Obuna bo'lganingizga dalil sifatida screenshot yuboring.\n"
-        "3. Admin screenshotni tekshirib, tasdiqlaydi yoki rad etadi.\n"
-        "4. Yig'gan tangalaringiz bilan o'z sahifangizni \"Post qilish\" orqali "
-        "vazifa qilib qo'yishingiz mumkin — boshqalar sizga obuna bo'lib beradi.\n\n"
-        "⚠️ Screenshot soxta bo'lsa yoki obuna bo'lmasdan yuborilsa, rad etiladi.",
-        reply_markup=MAIN_MENU,
-        parse_mode="HTML",
-    )
-
-
-async def show_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    top = db.get_top_users()
-    if not top:
-        await update.message.reply_text("Hali hech kim tanga to'plamagan.")
-        return
-    lines = ["🏆 <b>Eng ko'p tanga to'plaganlar</b>\n"]
-    for i, u in enumerate(top, 1):
-        name = u["username"] or "Foydalanuvchi"
-        lines.append(f"{i}. @{name} — {u['coins']} tanga")
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-
-
-# ---------- vazifa bajarish (obuna bo'lish -> screenshot) ----------
-
-async def next_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    worker_id = update.effective_user.id
-    task = db.get_next_task(worker_id)
-    if not task:
-        await update.message.reply_text(
-            "Hozircha bajarish uchun vazifa yo'q. Keyinroq qayta urinib ko'ring.",
-            reply_markup=MAIN_MENU,
+def init_db():
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Foydalanuvchilar jadvali
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            balance REAL DEFAULT 0,
+            referrer_id INTEGER,
+            joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        return ConversationHandler.END
+    """)
+    
+    # Vazifalar jadvali
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            link TEXT,
+            required_subs INTEGER,
+            completed_subs INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'active'
+        )
+    """)
+    
+    # Bajarilgan vazifalar
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS completed_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            task_id INTEGER
+        )
+    """)
+    
+    conn.commit()
+    conn.close()
 
-    context.user_data["current_task_id"] = task["task_id"]
-    await update.message.reply_text(
-        f"🎯 <b>Vazifa</b>\n\nUshbu sahifaga obuna bo'ling:\n{task['ig_link']}\n\n"
-        f"Mukofot: {task['coin_cost']} tanga\n\n"
-        "Obuna bo'lgach, shu yerga screenshot (rasm) yuboring 👇",
-        parse_mode="HTML",
+init_db()
+
+# ==========================================
+# 2. YORDAMCHI FUNKSIYALAR
+# ==========================================
+
+def register_user(user_id, username, referrer_id=None):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    user = cursor.fetchone()
+    
+    is_new = False
+    if not user:
+        cursor.execute(
+            "INSERT INTO users (user_id, username, balance, referrer_id) VALUES (?, ?, ?, ?)",
+            (user_id, username, 0.0, referrer_id)
+        )
+        conn.commit()
+        is_new = True
+        
+    conn.close()
+    return is_new
+
+def get_balance(user_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row["balance"] if row else 0.0
+
+def update_balance(user_id, amount):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+    conn.commit()
+    conn.close()
+
+# ==========================================
+# 3. MENYU TUGMALARI
+# ==========================================
+
+def get_main_menu():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(
+        types.KeyboardButton("🎯 Vazifa bajarish"),
+        types.KeyboardButton("💰 Balansim"),
+        types.KeyboardButton("📢 Post qilish"),
+        types.KeyboardButton("🏆 Reyting"),
+        types.KeyboardButton("👤 Profilim"),
+        types.KeyboardButton("🎁 Kunlik bonus"),
+        types.KeyboardButton("🤝 Taklif qilish"),
+        types.KeyboardButton("ℹ️ Qoidalar")
     )
-    return WAITING_SCREENSHOT
+    return markup
 
+# ==========================================
+# 4. HANDLERLAR (AMALLAR)
+# ==========================================
 
-async def receive_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    task_id = context.user_data.get("current_task_id")
-    if not task_id or not update.message.photo:
-        await update.message.reply_text("Iltimos, rasm (screenshot) yuboring.")
-        return WAITING_SCREENSHOT
-
-    worker = update.effective_user
-    photo_file_id = update.message.photo[-1].file_id
-    submission_id = db.create_submission(task_id, worker.id, photo_file_id)
-    task = db.get_task(task_id)
-
-    await update.message.reply_text(
-        "✅ Screenshot qabul qilindi. Admin tekshirgach, tanga hisobingizga qo'shiladi.",
-        reply_markup=MAIN_MENU,
-    )
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Tasdiqlash", callback_data=f"approve:{submission_id}"),
-            InlineKeyboardButton("❌ Rad etish", callback_data=f"reject:{submission_id}"),
-        ]
-    ])
-    caption = (
-        f"Yangi tasdiqlash so'rovi\n\n"
-        f"Foydalanuvchi: @{worker.username or worker.first_name} (ID: {worker.id})\n"
-        f"Vazifa: {task['ig_link']}\n"
-        f"Mukofot: {task['coin_cost']} tanga"
-    )
-    for admin_id in ADMIN_IDS:
+@bot.message_handler(commands=['start'])
+def start_cmd(message):
+    user_id = message.from_user.id
+    username = message.from_user.username or message.from_user.first_name
+    
+    # Referal ID'sini tekshirish (/start 123456)
+    args = message.text.split()
+    referrer_id = int(args[1]) if len(args) > 1 and args[1].isdigit() else None
+    
+    is_new = register_user(user_id, username, referrer_id)
+    
+    # Yangi foydalanuvchi bo'lsa va taklif qilgan odam bo'lsa
+    if is_new and referrer_id and referrer_id != user_id:
+        update_balance(referrer_id, 10.0) # Referal uchun 10 tanga
         try:
-            await context.bot.send_photo(
-                chat_id=admin_id, photo=photo_file_id, caption=caption, reply_markup=keyboard
-            )
-        except Exception as e:
-            logger.warning(f"Adminga yuborishda xatolik ({admin_id}): {e}")
+            bot.send_message(referrer_id, "🎉 Siz taklif qilgan do'stingiz botga qo'shildi! Sizga +10 tanga berildi.")
+        except:
+            pass
 
-    return ConversationHandler.END
-
-
-async def cancel_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Bekor qilindi.", reply_markup=MAIN_MENU)
-    return ConversationHandler.END
-
-
-# ---------- admin tasdiqlash tugmalari ----------
-
-async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id not in ADMIN_IDS:
-        await query.answer("Sizda ruxsat yo'q.", show_alert=True)
-        return
-
-    action, sub_id_str = query.data.split(":")
-    submission_id = int(sub_id_str)
-
-    if action == "approve":
-        result = db.approve_submission(submission_id)
-        if result is None:
-            await query.edit_message_caption(caption=(query.message.caption or "") + "\n\n⚠️ Allaqachon ko'rib chiqilgan.")
-            return
-        await context.bot.send_message(
-            chat_id=result["worker_id"],
-            text=f"✅ Screenshotingiz tasdiqlandi! +{result['coin_cost']} tanga hisobingizga qo'shildi.",
-        )
-        await query.edit_message_caption(caption=(query.message.caption or "") + "\n\n✅ Tasdiqlandi")
-
-    elif action == "reject":
-        result = db.reject_submission(submission_id)
-        if result is None:
-            await query.edit_message_caption(caption=(query.message.caption or "") + "\n\n⚠️ Allaqachon ko'rib chiqilgan.")
-            return
-        await context.bot.send_message(
-            chat_id=result["worker_id"],
-            text="❌ Screenshotingiz rad etildi. Iltimos, haqiqiy obuna bo'lganingizni tasdiqlaydigan rasm yuboring.",
-        )
-        await query.edit_message_caption(caption=(query.message.caption or "") + "\n\n❌ Rad etildi")
-
-
-# ---------- post qilish (o'z sahifasini vazifa qilib qo'yish) ----------
-
-async def post_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Instagram sahifangiz havolasini yuboring (masalan: https://instagram.com/username):"
+    welcome_text = (
+        f"Assalomu alaykum, {message.from_user.first_name}! 👋\n\n"
+        "Instagram sahifalarga obuna bo'lib tanga ishlang va o me profilingizga obunachi to'plang.\n"
+        "📌 **Narx:** 100 obunachi = 50 tanga"
     )
-    return ASK_LINK
+    bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown", reply_markup=get_main_menu())
 
+@bot.message_handler(func=lambda m: m.text == "💰 Balansim")
+def show_balance(message):
+    bal = get_balance(message.from_user.id)
+    bot.send_message(message.chat.id, f"💰 Sizning balansingiz: **{bal} tanga**", parse_mode="Markdown")
 
-async def post_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    link = update.message.text.strip()
+@bot.message_handler(func=lambda m: m.text == "👤 Profilim")
+def show_profile(message):
+    user_id = message.from_user.id
+    bal = get_balance(user_id)
+    text = (
+        f"👤 **Sizning profilingiz:**\n\n"
+        f"🆔 ID: `{user_id}`\n"
+        f"👤 Ism: {message.from_user.first_name}\n"
+        f"💰 Balans: **{bal} tanga**"
+    )
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+
+@bot.message_handler(func=lambda m: m.text == "🎁 Kunlik bonus")
+def daily_bonus(message):
+    user_id = message.from_user.id
+    update_balance(user_id, 5.0)
+    new_bal = get_balance(user_id)
+    bot.send_message(
+        message.chat.id, 
+        f"🎁 Sizga **5 tanga** kunlik bonus berildi!\nHozirgi balansingiz: **{new_bal} tanga**", 
+        parse_mode="Markdown"
+    )
+
+@bot.message_handler(func=lambda m: m.text == "🤝 Taklif qilish")
+def invite_friends(message):
+    user_id = message.from_user.id
+    ref_link = f"https://t.me/{bot.get_me().username}?start={user_id}"
+    text = (
+        "🤝 **Do'stlaringizni taklif qiling!**\n\n"
+        f"Sizning taklif havolangiz:\n`{ref_link}`\n\n"
+        "Har bir yangi do'stingiz uchun **10 tanga** beriladi!"
+    )
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+
+@bot.message_handler(func=lambda m: m.text == "🏆 Reyting")
+def rating(message):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT username, balance FROM users ORDER BY balance DESC LIMIT 10")
+    users = cursor.fetchall()
+    conn.close()
+    
+    text = "🏆 **Eng ko'p tanga to'plaganlar:**\n\n"
+    for idx, u in enumerate(users, start=1):
+        uname = u["username"] or "Foydalanuvchi"
+        text += f"{idx}. @{uname} — {u['balance']} tanga\n"
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+
+@bot.message_handler(func=lambda m: m.text == "ℹ️ Qoidalar")
+def rules(message):
+    text = "ℹ️ **Qoidalar:**\n\n1. Halol bo'ling.\n2. Obunani bekor qilmang.\n3. 100 obunachi = 50 tanga."
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+
+# ==========================================
+# 5. POST QILISH (VAZIFA JOYLASHTIRISH)
+# ==========================================
+
+@bot.message_handler(func=lambda m: m.text == "📢 Post qilish")
+def start_post(message):
+    msg = bot.send_message(message.chat.id, "Instagram sahifangiz havolasini yuboring (masalan: https://instagram.com/username):")
+    bot.register_next_step_handler(msg, step_link)
+
+def step_link(message):
+    link = message.text.strip()
     if "instagram.com" not in link:
-        await update.message.reply_text("Iltimos, to'g'ri Instagram havolasini yuboring.")
-        return ASK_LINK
-    context.user_data["post_link"] = link
-    balance = db.get_balance(update.effective_user.id)
-    await update.message.reply_text(
-        f"Nechta obunachi kerak? (1 obunachi = {COIN_PER_FOLLOW} tanga)\n"
-        f"Sizning balansingiz: {balance} tanga"
-    )
-    return ASK_COUNT
-
-
-async def post_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    if not text.isdigit() or int(text) <= 0:
-        await update.message.reply_text("Iltimos, musbat butun son kiriting.")
-        return ASK_COUNT
-
-    count = int(text)
-    cost = count * COIN_PER_FOLLOW
-    user_id = update.effective_user.id
-    balance = db.get_balance(user_id)
-
-    if balance < cost:
-        await update.message.reply_text(
-            f"Yetarli tangangiz yo'q. Kerak: {cost}, mavjud: {balance}.\n"
-            "Avval \"🎯 Vazifa bajarish\" orqali tanga to'plang.",
-            reply_markup=MAIN_MENU,
-        )
-        return ConversationHandler.END
-
-    link = context.user_data["post_link"]
-    db.deduct_coins(user_id, cost)
-    db.create_task(user_id, link, count, COIN_PER_FOLLOW)
-
-    await update.message.reply_text(
-        f"✅ Vazifa yaratildi! {count} ta obunachi uchun {cost} tanga yechildi.\n"
-        "Boshqa foydalanuvchilar sahifangizga obuna bo'la boshlaydi.",
-        reply_markup=MAIN_MENU,
-    )
-    return ConversationHandler.END
-
-
-# ---------- admin: statistika ----------
-
-async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
+        bot.send_message(message.chat.id, "❌ Noto'g'ri havola. Qayta urinib ko'ring.")
         return
-    stats = db.get_stats()
-    await update.message.reply_text(
-        f"📊 <b>Statistika</b>\n\n"
-        f"Foydalanuvchilar: {stats['users']}\n"
-        f"Faol vazifalar: {stats['active_tasks']}\n"
-        f"Kutilayotgan tasdiqlar: {stats['pending']}\n"
-        f"Tasdiqlangan: {stats['approved']}",
-        parse_mode="HTML",
+    
+    bal = get_balance(message.from_user.id)
+    msg = bot.send_message(
+        message.chat.id, 
+        f"Nechta obunachi kerak? (100 obunachi = 50 tanga)\nBalansingiz: **{bal} tanga**", 
+        parse_mode="Markdown"
     )
+    bot.register_next_step_handler(msg, step_count, link)
 
+def step_count(message, link):
+    user_id = message.from_user.id
+    try:
+        count = int(message.text)
+        if count <= 0:
+            bot.send_message(message.chat.id, "❌ Musbat son kiriting!")
+            return
+            
+        required_coins = count * 0.5  # 100 obunachi = 50 tanga
+        current_bal = get_balance(user_id)
+        
+        if current_bal < required_coins:
+            bot.send_message(
+                message.chat.id, 
+                f"❌ Mablag' yetarli emas!\nKerak: **{required_coins} tanga**, sizda: **{current_bal} tanga**", 
+                parse_mode="Markdown"
+            )
+        else:
+            update_balance(user_id, -required_coins)
+            
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO tasks (user_id, link, required_subs) VALUES (?, ?, ?)", (user_id, link, count))
+            conn.commit()
+            conn.close()
+            
+            bot.send_message(message.chat.id, f"✅ Vazifa yaratildi!\n{count} ta obunachi uchun **{required_coins} tanga** yechildi.", parse_mode="Markdown")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Faqat raqam yuboring!")
 
-def main():
-    if not BOT_TOKEN:
-        raise SystemExit("BOT_TOKEN topilmadi. .env faylini tekshiring.")
+# ==========================================
+# 6. VAZIFA BAJARISH VA ADMIN BUYRUG'I
+# ==========================================
 
-    db.init_db()
-    app = Application.builder().token(BOT_TOKEN).build()
+@bot.message_handler(func=lambda m: m.text == "🎯 Vazifa bajarish")
+def do_task(message):
+    user_id = message.from_user.id
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT * FROM tasks 
+        WHERE status = 'active' AND user_id != ? AND id NOT IN (
+            SELECT task_id FROM completed_tasks WHERE user_id = ?
+        ) LIMIT 1
+    """, (user_id, user_id))
+    task = cursor.fetchone()
+    conn.close()
+    
+    if task:
+        bot.send_message(message.chat.id, f"Ushbu sahifaga obuna bo'ling:\n{task['link']}")
+    else:
+        bot.send_message(message.chat.id, "Hozircha vazifalar yo'q. Keyinroq qayta urinib ko'ring.")
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stats", admin_stats))
-    app.add_handler(MessageHandler(filters.Regex("^💰 Balansim$"), show_balance))
-    app.add_handler(MessageHandler(filters.Regex("^👤 Profilim$"), show_profile))
-    app.add_handler(MessageHandler(filters.Regex("^🎁 Kunlik bonus$"), daily_bonus))
-    app.add_handler(MessageHandler(filters.Regex("^ℹ️ Qoidalar$"), show_rules))
-    app.add_handler(MessageHandler(filters.Regex("^🏆 Reyting$"), show_top))
-
-    task_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^🎯 Vazifa bajarish$"), next_task)],
-        states={
-            WAITING_SCREENSHOT: [MessageHandler(filters.PHOTO, receive_screenshot)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel_task)],
-    )
-    app.add_handler(task_conv)
-
-    post_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^📢 Post qilish$"), post_start)],
-        states={
-            ASK_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, post_link)],
-            ASK_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, post_count)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel_task)],
-    )
-    app.add_handler(post_conv)
-
-    app.add_handler(CallbackQueryHandler(handle_admin_decision, pattern="^(approve|reject):"))
-
-    logger.info("Bot ishga tushdi...")
-    app.run_polling()
-
+@bot.message_handler(commands=['addcoins'])
+def add_coins_admin(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        _, target_id, amount = message.text.split()
+        update_balance(int(target_id), float(amount))
+        bot.send_message(message.chat.id, f"✅ `{target_id}` foydalanuvchiga {amount} tanga qo'shildi.")
+    except:
+        bot.send_message(message.chat.id, "Format: `/addcoins USER_ID TANGA`", parse_mode="Markdown")
 
 if __name__ == "__main__":
-    main()
+    bot.infinity_polling()
